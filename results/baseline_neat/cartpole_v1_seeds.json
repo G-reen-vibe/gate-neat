@@ -1,0 +1,326 @@
+[
+  {
+    "seed": 0,
+    "best_fitness": 500.0,
+    "total_episodes": 720,
+    "generations": 3,
+    "wall_time": 1.0753390789031982,
+    "history": [
+      {
+        "generation": 0,
+        "best": 324.0,
+        "mean": 20.2,
+        "median": 9.666666666666666,
+        "std": 40.455448747150655,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.13068723678588867
+      },
+      {
+        "generation": 1,
+        "best": 474.3333333333333,
+        "mean": 82.4375,
+        "median": 35.16666666666667,
+        "std": 110.94040684767556,
+        "avg_size": 10.5125,
+        "avg_hidden": 0.3375,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.2669861316680908
+      },
+      {
+        "generation": 2,
+        "best": 500.0,
+        "mean": 210.2125,
+        "median": 221.0,
+        "std": 146.69900442506608,
+        "avg_size": 10.7625,
+        "avg_hidden": 0.625,
+        "n_species": 1,
+        "total_episodes": 720,
+        "time": 0.6707420349121094
+      }
+    ]
+  },
+  {
+    "seed": 1,
+    "best_fitness": 500.0,
+    "total_episodes": 720,
+    "generations": 3,
+    "wall_time": 0.5347106456756592,
+    "history": [
+      {
+        "generation": 0,
+        "best": 171.66666666666666,
+        "mean": 17.84583333333333,
+        "median": 9.666666666666666,
+        "std": 23.495740970439723,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.06759381294250488
+      },
+      {
+        "generation": 1,
+        "best": 168.0,
+        "mean": 47.90833333333334,
+        "median": 35.83333333333333,
+        "std": 40.552845324204924,
+        "avg_size": 10.325,
+        "avg_hidden": 0.225,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.15849018096923828
+      },
+      {
+        "generation": 2,
+        "best": 500.0,
+        "mean": 93.30416666666667,
+        "median": 74.0,
+        "std": 84.24135619605136,
+        "avg_size": 10.825,
+        "avg_hidden": 0.375,
+        "n_species": 1,
+        "total_episodes": 720,
+        "time": 0.30071020126342773
+      }
+    ]
+  },
+  {
+    "seed": 2,
+    "best_fitness": 500.0,
+    "total_episodes": 720,
+    "generations": 3,
+    "wall_time": 0.7379264831542969,
+    "history": [
+      {
+        "generation": 0,
+        "best": 392.0,
+        "mean": 19.354166666666664,
+        "median": 9.666666666666666,
+        "std": 43.64555290283816,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.07262086868286133
+      },
+      {
+        "generation": 1,
+        "best": 392.0,
+        "mean": 59.333333333333336,
+        "median": 25.333333333333336,
+        "std": 94.13292905956627,
+        "avg_size": 10.4125,
+        "avg_hidden": 0.225,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.1938185691833496
+      },
+      {
+        "generation": 2,
+        "best": 500.0,
+        "mean": 145.50416666666666,
+        "median": 62.166666666666664,
+        "std": 164.14230778462058,
+        "avg_size": 11.2125,
+        "avg_hidden": 0.6375,
+        "n_species": 1,
+        "total_episodes": 720,
+        "time": 0.463179349899292
+      }
+    ]
+  },
+  {
+    "seed": 3,
+    "best_fitness": 500.0,
+    "total_episodes": 720,
+    "generations": 3,
+    "wall_time": 0.6143143177032471,
+    "history": [
+      {
+        "generation": 0,
+        "best": 147.66666666666666,
+        "mean": 16.558333333333334,
+        "median": 9.666666666666666,
+        "std": 23.315217670011148,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.06570863723754883
+      },
+      {
+        "generation": 1,
+        "best": 387.6666666666667,
+        "mean": 56.43333333333332,
+        "median": 33.0,
+        "std": 64.04424252030779,
+        "avg_size": 10.4,
+        "avg_hidden": 0.2125,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.18714237213134766
+      },
+      {
+        "generation": 2,
+        "best": 500.0,
+        "mean": 106.8,
+        "median": 92.0,
+        "std": 89.99993209873982,
+        "avg_size": 11.0,
+        "avg_hidden": 0.7375,
+        "n_species": 1,
+        "total_episodes": 720,
+        "time": 0.353271484375
+      }
+    ]
+  },
+  {
+    "seed": 4,
+    "best_fitness": 500.0,
+    "total_episodes": 480,
+    "generations": 2,
+    "wall_time": 0.3187854290008545,
+    "history": [
+      {
+        "generation": 0,
+        "best": 225.0,
+        "mean": 24.35,
+        "median": 9.666666666666666,
+        "std": 40.282850638398905,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.08693766593933105
+      },
+      {
+        "generation": 1,
+        "best": 500.0,
+        "mean": 70.13333333333334,
+        "median": 48.0,
+        "std": 73.02251555361386,
+        "avg_size": 10.475,
+        "avg_hidden": 0.2625,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.22729945182800293
+      }
+    ]
+  },
+  {
+    "seed": 5,
+    "best_fitness": 500.0,
+    "total_episodes": 480,
+    "generations": 2,
+    "wall_time": 0.2713327407836914,
+    "history": [
+      {
+        "generation": 0,
+        "best": 191.0,
+        "mean": 16.958333333333332,
+        "median": 9.666666666666666,
+        "std": 24.08044244471711,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.06565189361572266
+      },
+      {
+        "generation": 1,
+        "best": 500.0,
+        "mean": 61.95416666666667,
+        "median": 31.333333333333336,
+        "std": 81.54378073822267,
+        "avg_size": 10.3875,
+        "avg_hidden": 0.2,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.2011563777923584
+      }
+    ]
+  },
+  {
+    "seed": 6,
+    "best_fitness": 500.0,
+    "total_episodes": 720,
+    "generations": 3,
+    "wall_time": 0.7365491390228271,
+    "history": [
+      {
+        "generation": 0,
+        "best": 295.3333333333333,
+        "mean": 19.633333333333333,
+        "median": 9.666666666666666,
+        "std": 35.95755986035636,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.07397031784057617
+      },
+      {
+        "generation": 1,
+        "best": 348.6666666666667,
+        "mean": 57.325,
+        "median": 30.833333333333336,
+        "std": 73.72237665352661,
+        "avg_size": 10.425,
+        "avg_hidden": 0.275,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.18935799598693848
+      },
+      {
+        "generation": 2,
+        "best": 500.0,
+        "mean": 145.425,
+        "median": 96.0,
+        "std": 149.77020337652093,
+        "avg_size": 10.6875,
+        "avg_hidden": 0.45,
+        "n_species": 1,
+        "total_episodes": 720,
+        "time": 0.4651005268096924
+      }
+    ]
+  },
+  {
+    "seed": 7,
+    "best_fitness": 500.0,
+    "total_episodes": 480,
+    "generations": 2,
+    "wall_time": 0.24329400062561035,
+    "history": [
+      {
+        "generation": 0,
+        "best": 221.66666666666666,
+        "mean": 19.529166666666665,
+        "median": 10.0,
+        "std": 27.40147470433338,
+        "avg_size": 10.0,
+        "avg_hidden": 0.0,
+        "n_species": 0,
+        "total_episodes": 240,
+        "time": 0.07404971122741699
+      },
+      {
+        "generation": 1,
+        "best": 500.0,
+        "mean": 49.75416666666666,
+        "median": 36.33333333333333,
+        "std": 65.77349060200638,
+        "avg_size": 10.4,
+        "avg_hidden": 0.2125,
+        "n_species": 1,
+        "total_episodes": 480,
+        "time": 0.16389155387878418
+      }
+    ]
+  }
+]
