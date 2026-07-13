@@ -159,11 +159,15 @@ def evaluate_episode(
     steps = 0
     terminated = False
     truncated = False
-    # For behavioral characterization: collect mean/var of obs and action stats.
+    # For behavioral characterization: collect mean/var/min/max of obs and action stats.
     obs_sum = np.zeros_like(obs, dtype=np.float64)
     obs_sq_sum = np.zeros_like(obs, dtype=np.float64)
+    obs_min = np.array(obs, dtype=np.float64).copy()
+    obs_max = np.array(obs, dtype=np.float64).copy()
     action_sum = 0.0
     action_sq_sum = 0.0
+    action_seq_diversity = 0.0  # number of action switches
+    last_action = -1
     while not (terminated or truncated) and steps < max_steps:
         out = net.activate(obs)
         # For discrete 2-output: pick argmax. For single-output: threshold at 0.
@@ -171,8 +175,13 @@ def evaluate_episode(
             action = int(np.argmax(out))
         else:
             action = 1 if out[0] > 0.0 else 0
+        if action != last_action and steps > 0:
+            action_seq_diversity += 1
+        last_action = action
         obs_sum += obs
         obs_sq_sum += obs * obs
+        obs_min = np.minimum(obs_min, obs)
+        obs_max = np.maximum(obs_max, obs)
         action_sum += action
         action_sq_sum += action * action
         obs, reward, terminated, truncated, _ = env.step(action)
@@ -183,8 +192,12 @@ def evaluate_episode(
     info = {
         "obs_mean": obs_sum / max(1, steps),
         "obs_var": obs_sq_sum / max(1, steps) - (obs_sum / max(1, steps)) ** 2,
+        "obs_min": obs_min,
+        "obs_max": obs_max,
+        "obs_range": obs_max - obs_min,
         "action_mean": action_sum / max(1, steps),
         "action_var": action_sq_sum / max(1, steps) - (action_sum / max(1, steps)) ** 2,
+        "action_seq_diversity": action_seq_diversity / max(1, steps),
         "steps": steps,
     }
     return total_reward, steps, info

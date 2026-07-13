@@ -83,6 +83,15 @@ GATE_CFG = {
     "max_generations": 100,
     # Apply SPSA + directed growth only to top elites (saves compute)
     "spsa_top_fraction": 0.25,      # apply SPSA only to top 25% of species (by best fitness)
+    # Novelty-weighted fitness (for exploration in deceptive tasks)
+    "novelty_weight": 0.0,          # weight on novelty bonus in effective fitness
+    "novelty_k": 5,                 # k-nearest-neighbors for novelty computation
+    "novelty_normalize": True,      # normalize novelty to [0, 1] range
+    # Initialization
+    "weight_init_std": 1.0,         # std of initial connection weights (larger = more diverse)
+    # Dual SPSA: when fitness is flat, also probe novelty gradient
+    "dual_spsa": True,              # if True, run novelty SPSA when fitness is uninformative
+    "dual_spsa_fitness_threshold": 1e-3,  # if fitness variance across pop < this, use novelty SPSA
 }
 
 
@@ -119,6 +128,7 @@ class GATE:
                 self.n_inputs, self.n_outputs, self.tracker,
                 output_activation="tanh",
                 connect_input_output=True,
+                weight_init_std=self.cfg["weight_init_std"],
                 rng=self.rng,
             )
             self.population.append(g)
@@ -132,9 +142,10 @@ class GATE:
             reward, steps, info = evaluate_episode(net, env, seed=seed, max_steps=max_steps)
             rewards.append(reward)
             self.total_episodes += 1
+            # Richer behavioral signature: obs_mean, obs_var, obs_range, action stats, action seq diversity, steps.
             beh = np.concatenate([
-                info["obs_mean"], info["obs_var"],
-                [info["action_mean"], info["action_var"], float(steps)],
+                info["obs_mean"], info["obs_var"], info["obs_range"],
+                [info["action_mean"], info["action_var"], info["action_seq_diversity"], float(steps)],
             ])
             behaviors.append(beh)
         return float(np.mean(rewards)), tuple(np.mean(behaviors, axis=0))
@@ -148,6 +159,44 @@ class GATE:
             genome.fitness = fit
             genome.behavior = beh
         env.close()
+        # Compute novelty bonus (if enabled).
+        if self.cfg["novelty_weight"] > 0.0 and len(self.population) > 1:
+            novelties = self._compute_novelties()
+            # Normalize novelties to [0, 1] for stable weighting across envs.
+            if self.cfg["novelty_normalize"]:
+                max_nov = max(novelties) if novelties else 1.0
+                if max_nov > 1e-9:
+                    novelties = [n / max_nov for n in novelties]
+            # Blend novelty into fitness.
+            for g, nov in zip(self.population, novelties):
+                g._novelty = nov
+                # Don't overwrite raw fitness; use effective fitness in selection.
+                g.effective_fitness = g.fitness + self.cfg["novelty_weight"] * nov
+        else:
+            for g in self.population:
+                g._novelty = 0.0
+                g.effective_fitness = g.fitness
+
+    def _compute_novelties(self) -> List[float]:
+        """For each genome, compute average behavioral distance to k nearest neighbors.
+        This is the standard novelty-search criterion, integrated with GATE's behavioral
+        characterization (no separate archive needed - the population IS the archive)."""
+        k = min(self.cfg["novelty_k"], len(self.population) - 1)
+        if k <= 0:
+            return [0.0] * len(self.population)
+        novelties = []
+        behs = [np.array(g.behavior) for g in self.population]
+        for i, beh_i in enumerate(behs):
+            dists = []
+            for j, beh_j in enumerate(behs):
+                if i == j:
+                    continue
+                d = float(np.linalg.norm(beh_i - beh_j))
+                dists.append(d)
+            dists.sort()
+            nov = sum(dists[:k]) / k if dists else 0.0
+            novelties.append(nov)
+        return novelties
 
     def spsa_probe_and_step(self, genome: Genome, env) -> Tuple[float, List[Tuple[int, float]]]:
         """Run a single SPSA probe on genome. Updates weights in-place and returns
@@ -168,17 +217,40 @@ class GATE:
         deltas = np.array([self.rng.choice([-1, 1]) for _ in enabled_conns], dtype=np.float64)
         orig_ws = np.array([c.weight for c in enabled_conns], dtype=np.float64)
 
-        # f(w + c*Δ)
+        # f(w + c*Δ) - use effective fitness (fitness + novelty bonus) so SPSA optimizes both
         for i, c in enumerate(enabled_conns):
             c.weight = float(orig_ws[i] + eps * deltas[i])
-        f_plus, _ = self._evaluate_genome(genome, env, n_eps, max_steps)
+        f_plus, beh_plus = self._evaluate_genome(genome, env, n_eps, max_steps)
         # f(w - c*Δ)
         for i, c in enumerate(enabled_conns):
             c.weight = float(orig_ws[i] - eps * deltas[i])
-        f_minus, _ = self._evaluate_genome(genome, env, n_eps, max_steps)
+        f_minus, beh_minus = self._evaluate_genome(genome, env, n_eps, max_steps)
+
+        # If dual_spsa is on and fitness is flat, use novelty as the objective.
+        use_novelty = False
+        if self.cfg.get("dual_spsa", False) and self.cfg["novelty_weight"] > 0.0:
+            # Check if fitness is flat (low variance in pop).
+            fits = [g.fitness for g in self.population]
+            fit_var = float(np.var(fits)) if fits else 0.0
+            if fit_var < self.cfg["dual_spsa_fitness_threshold"]:
+                use_novelty = True
+        if use_novelty:
+            # Use behavioral distance to population mean as novelty signal.
+            pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
+            if pop_behs:
+                pop_mean = np.mean(pop_behs, axis=0)
+                # Novelty = distance from population mean.
+                f_plus_eff = float(np.linalg.norm(np.array(beh_plus) - pop_mean))
+                f_minus_eff = float(np.linalg.norm(np.array(beh_minus) - pop_mean))
+            else:
+                f_plus_eff = f_plus
+                f_minus_eff = f_minus
+        else:
+            f_plus_eff = f_plus
+            f_minus_eff = f_minus
 
         # Per-weight gradient estimate
-        grad = (f_plus - f_minus) / (2 * eps * deltas)
+        grad = (f_plus_eff - f_minus_eff) / (2 * eps * deltas)
         # Update weights (gradient ascent)
         for i, c in enumerate(enabled_conns):
             c.weight = float(orig_ws[i] + lr * grad[i])
@@ -265,7 +337,7 @@ class GATE:
         avg_saliency = []
 
         for sp in self.speciator.species:
-            members = sorted(sp.members, key=lambda g: g.fitness, reverse=True)
+            members = sorted(sp.members, key=lambda g: getattr(g, 'effective_fitness', g.fitness), reverse=True)
             if not members:
                 continue
             sp_offspring_count = int(round(
@@ -320,9 +392,10 @@ class GATE:
                     total_random_explore += 1
                 new_population.append(child)
 
+        # Fill short population.
         while len(new_population) < pop_size:
             if self.population:
-                parent = max(self.population, key=lambda g: g.fitness)
+                parent = max(self.population, key=lambda g: getattr(g, 'effective_fitness', g.fitness))
                 child = parent.copy()
                 mutate(child, self.tracker, self.rng, self.cfg)
                 new_population.append(child)
@@ -334,8 +407,9 @@ class GATE:
         if env is not None:
             env.close()
         for g in self.population:
-            if g.fitness > self.best_fitness:
-                self.best_fitness = g.fitness
+            eff = getattr(g, 'effective_fitness', g.fitness)
+            if eff > self.best_fitness:
+                self.best_fitness = eff
                 self.best_genome = g.copy()
         self._last_debug = {
             "total_spsa": total_spsa,
@@ -363,13 +437,16 @@ class GATE:
         avg_size = float(np.mean([g.num_enabled_connections() for g in self.population]))
         avg_hidden = float(np.mean([g.num_hidden() for g in self.population]))
         n_species = len(self.speciator.species) if self.speciator.species else 0
+        novs = [getattr(g, '_novelty', 0.0) for g in self.population]
         for g in self.population:
-            if g.fitness > self.best_fitness:
-                self.best_fitness = g.fitness
+            eff = getattr(g, 'effective_fitness', g.fitness)
+            if eff > self.best_fitness:
+                self.best_fitness = eff
                 self.best_genome = g.copy()
         stats = {
             "generation": self.generation,
             "best": best,
+            "best_eff": self.best_fitness,
             "mean": mean,
             "median": median,
             "std": std,
@@ -378,6 +455,7 @@ class GATE:
             "n_species": n_species,
             "total_episodes": self.total_episodes,
             "time": time.time() - t0,
+            "novelty_mean": float(np.mean(novs)) if novs else 0.0,
         }
         self.history.append(stats)
         self.reproduce()

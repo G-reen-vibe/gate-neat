@@ -206,6 +206,7 @@ def make_initial_genome(
     tracker: InnovationTracker,
     output_activation: str = "tanh",
     connect_input_output: bool = True,
+    weight_init_std: float = 1.0,
     rng: random.Random | None = None,
 ) -> Genome:
     """Create a minimal starting genome: inputs + bias + outputs, fully connected (or unconnected)."""
@@ -230,6 +231,6 @@ def make_initial_genome(
                 inv = tracker.get_add_connection(in_id, out_id)
                 g.connections[inv] = ConnectionGene(
                     innovation=inv, in_node=in_id, out_node=out_id,
-                    weight=rng.gauss(0.0, 1.0),
+                    weight=rng.gauss(0.0, weight_init_std),
                 )
     return g
