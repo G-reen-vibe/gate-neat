@@ -101,6 +101,10 @@ GATE_CFG = {
     "adaptive_novelty_patience": 5,       # gens without improvement before increasing novelty
     "adaptive_novelty_factor": 1.5,       # multiply novelty_weight by this when stagnating
     "adaptive_novelty_decay": 0.7,        # multiply novelty_weight by this when improving (toward base)
+    # Behavioral archive: keep diverse past behaviors for novelty computation
+    "use_archive": True,                  # enable behavioral archive
+    "archive_size": 30,                   # max archive size (small = focused on truly novel)
+    "archive_add_threshold": 0.8,         # add to archive if novelty > this * max_nov (high = selective)
 }
 
 
@@ -135,6 +139,8 @@ class GATE:
         self._cur_novelty_weight = self.cfg["novelty_weight"]
         self._best_fitness_history: List[float] = []
         self._stagnation_count = 0
+        # Behavioral archive: list of past behavior vectors (tuples).
+        self._archive: List[tuple] = []
 
     def init_population(self):
         self.population = []
@@ -177,6 +183,8 @@ class GATE:
         # Compute novelty bonus (if enabled).
         if self.cfg["novelty_weight"] > 0.0 and len(self.population) > 1:
             novelties = self._compute_novelties()
+            # Update archive with novel behaviors.
+            self._update_archive(novelties)
             # Normalize novelties to [0, 1] for stable weighting across envs.
             if self.cfg["novelty_normalize"]:
                 max_nov = max(novelties) if novelties else 1.0
@@ -186,25 +194,30 @@ class GATE:
             for g, nov in zip(self.population, novelties):
                 g._novelty = nov
                 # Don't overwrite raw fitness; use effective fitness in selection.
-                g.effective_fitness = g.fitness + self.cfg["novelty_weight"] * nov
+                g.effective_fitness = g.fitness + self._cur_novelty_weight * nov
         else:
             for g in self.population:
                 g._novelty = 0.0
                 g.effective_fitness = g.fitness
 
     def _compute_novelties(self) -> List[float]:
-        """For each genome, compute average behavioral distance to k nearest neighbors.
-        This is the standard novelty-search criterion, integrated with GATE's behavioral
-        characterization (no separate archive needed - the population IS the archive)."""
-        k = min(self.cfg["novelty_k"], len(self.population) - 1)
+        """For each genome, compute average behavioral distance to k nearest neighbors
+        in (population + archive). This is the standard novelty-search criterion with
+        an archive, integrated with GATE's behavioral characterization."""
+        k = min(self.cfg["novelty_k"], len(self.population) - 1 + len(self._archive))
         if k <= 0:
             return [0.0] * len(self.population)
+        # Build reference set: population (excluding self) + archive.
+        pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
+        archive_behs = [np.array(b) for b in self._archive]
+        reference = pop_behs + archive_behs
+        if not reference:
+            return [0.0] * len(self.population)
         novelties = []
-        behs = [np.array(g.behavior) for g in self.population]
-        for i, beh_i in enumerate(behs):
+        for i, beh_i in enumerate(pop_behs):
             dists = []
-            for j, beh_j in enumerate(behs):
-                if i == j:
+            for j, beh_j in enumerate(reference):
+                if j == i:
                     continue
                 d = float(np.linalg.norm(beh_i - beh_j))
                 dists.append(d)
@@ -212,6 +225,21 @@ class GATE:
             nov = sum(dists[:k]) / k if dists else 0.0
             novelties.append(nov)
         return novelties
+
+    def _update_archive(self, novelties: List[float]):
+        """Add genomes with high novelty to the archive. Keeps the archive bounded."""
+        if not self.cfg.get("use_archive", False):
+            return
+        max_nov = max(novelties) if novelties else 1.0
+        if max_nov < 1e-9:
+            return
+        threshold = self.cfg["archive_add_threshold"] * max_nov
+        for g, nov in zip(self.population, novelties):
+            if nov >= threshold and g.behavior is not None:
+                self._archive.append(g.behavior)
+        # Trim archive to max size (keep most recent).
+        if len(self._archive) > self.cfg["archive_size"]:
+            self._archive = self._archive[-self.cfg["archive_size"]:]
 
     def spsa_probe_and_step(self, genome: Genome, env) -> Tuple[float, List[Tuple[int, float]]]:
         """Run SPSA probe(s) on genome. Updates weights in-place and returns
@@ -238,13 +266,17 @@ class GATE:
             return 0.0, []
 
         orig_ws = np.array([c.weight for c in enabled_conns], dtype=np.float64)
-        # Pre-compute population behaviors for novelty computation.
+        # Pre-compute population + archive behaviors for novelty computation.
         pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
+        archive_behs = [np.array(b) for b in self._archive]
+        reference = pop_behs + archive_behs
         pop_mean = np.mean(pop_behs, axis=0) if pop_behs else None
-        pop_novs = [float(np.linalg.norm(b - pop_mean)) for b in pop_behs] if pop_behs else []
-        avg_pop_nov = float(np.mean(pop_novs)) if pop_novs else 1.0
-        if avg_pop_nov < 1e-9:
-            avg_pop_nov = 1.0
+        # Use mean of all reference points (pop + archive) for novelty distance.
+        ref_mean = np.mean(reference, axis=0) if reference else pop_mean
+        ref_novs = [float(np.linalg.norm(b - ref_mean)) for b in reference] if reference else []
+        avg_ref_nov = float(np.mean(ref_novs)) if ref_novs else 1.0
+        if avg_ref_nov < 1e-9:
+            avg_ref_nov = 1.0
 
         # Accumulate gradient over multiple probes.
         grad_accum = np.zeros_like(orig_ws)
@@ -259,9 +291,9 @@ class GATE:
                 c.weight = float(orig_ws[i] - eps * deltas[i])
             f_minus, beh_minus = self._evaluate_genome(genome, env, n_eps, max_steps)
             # Effective fitness (fitness + novelty bonus, normalized).
-            if nov_weight > 0.0 and pop_mean is not None:
-                nov_plus = float(np.linalg.norm(np.array(beh_plus) - pop_mean)) / avg_pop_nov
-                nov_minus = float(np.linalg.norm(np.array(beh_minus) - pop_mean)) / avg_pop_nov
+            if nov_weight > 0.0 and ref_mean is not None:
+                nov_plus = float(np.linalg.norm(np.array(beh_plus) - ref_mean)) / avg_ref_nov
+                nov_minus = float(np.linalg.norm(np.array(beh_minus) - ref_mean)) / avg_ref_nov
                 f_plus_eff = f_plus + nov_weight * nov_plus
                 f_minus_eff = f_minus + nov_weight * nov_minus
             else:
