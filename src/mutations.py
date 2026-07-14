@@ -14,18 +14,42 @@ def mutate_weights(
     perturb_std: float = 0.25,
     replace_rate: float = 0.1,
     replace_std: float = 1.0,
+    saliency_weighted: bool = False,
+    saliency_scale: float = 2.0,
 ):
     """Mutate connection weights.
     - With probability perturb_rate: add Gaussian noise with perturb_std.
     - With probability replace_rate: replace with new Gaussian weight.
     - Otherwise: leave unchanged.
+
+    If saliency_weighted=True, the perturbation std is scaled inversely by the
+    connection's EMA saliency: high-saliency connections get small perturbations
+    (they're already important and well-tuned), low-saliency connections get large
+    perturbations (they're free to explore). This is the GATE principle applied to
+    mutation: the saliency signal that directs topology growth also directs weight
+    mutation magnitude.
     """
+    # Compute normalization for saliency scaling.
+    if saliency_weighted:
+        sals = [abs(c.saliency) for c in genome.connections.values() if c.enabled]
+        max_sal = max(sals) if sals else 1.0
+        if max_sal < 1e-9:
+            max_sal = 1.0
+    else:
+        max_sal = 1.0
     for conn in genome.connections.values():
         if not conn.enabled:
             continue
         r = rng.random()
         if r < perturb_rate:
-            conn.weight += rng.gauss(0.0, perturb_std)
+            if saliency_weighted:
+                # High saliency -> small perturbation; low saliency -> large perturbation.
+                # Scale: 1.0 (low sal) to 1/saliency_scale (high sal).
+                sal_frac = abs(conn.saliency) / max_sal  # 0 to 1
+                local_std = perturb_std * (1.0 + (saliency_scale - 1.0) * (1.0 - sal_frac))
+            else:
+                local_std = perturb_std
+            conn.weight += rng.gauss(0.0, local_std)
         elif r < perturb_rate + replace_rate:
             conn.weight = rng.gauss(0.0, replace_std)
 
@@ -196,6 +220,8 @@ def mutate(
             genome, rng,
             perturb_std=cfg.get("weight_perturb_std", 0.25),
             replace_rate=cfg.get("weight_replace_rate", 0.1),
+            saliency_weighted=cfg.get("saliency_weighted_mutation", False),
+            saliency_scale=cfg.get("saliency_mutation_scale", 2.0),
         )
     if rng.random() < cfg.get("add_conn_rate", 0.5):
         mutate_add_connection(genome, tracker, rng)

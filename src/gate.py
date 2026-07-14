@@ -92,6 +92,9 @@ GATE_CFG = {
     # Dual SPSA: when fitness is flat, also probe novelty gradient
     "dual_spsa": True,              # if True, run novelty SPSA when fitness is uninformative
     "dual_spsa_fitness_threshold": 1e-3,  # if fitness variance across pop < this, use novelty SPSA
+    # Saliency-weighted mutation (GATE principle applied to weight perturbation)
+    "saliency_weighted_mutation": True,   # scale mutation magnitude by inverse saliency
+    "saliency_mutation_scale": 2.0,       # max scale factor for low-saliency connections
 }
 
 
@@ -203,12 +206,18 @@ class GATE:
         (gradient_norm, [(innovation, |g_i|), ...]) for saliency tracking.
 
         The EMA saliency on each connection is updated in-place.
+
+        The SPSA objective is the EFFECTIVE fitness = fitness + novelty_weight * novelty.
+        This unifies fitness and novelty into a single gradient signal: when fitness is
+        flat, the novelty term dominates and drives exploration; when fitness is informative,
+        it dominates and drives exploitation. No threshold switching needed.
         """
         eps = self.cfg["spsa_eps"]
         lr = self.cfg["spsa_lr"]
         n_eps = self.cfg["spsa_episodes"]
         max_steps = self.cfg["max_steps"]
         decay = self.cfg["saliency_ema_decay"]
+        nov_weight = self.cfg["novelty_weight"]
 
         enabled_conns = [c for c in genome.connections.values() if c.enabled]
         if not enabled_conns:
@@ -217,7 +226,11 @@ class GATE:
         deltas = np.array([self.rng.choice([-1, 1]) for _ in enabled_conns], dtype=np.float64)
         orig_ws = np.array([c.weight for c in enabled_conns], dtype=np.float64)
 
-        # f(w + c*Δ) - use effective fitness (fitness + novelty bonus) so SPSA optimizes both
+        # Pre-compute population behaviors for novelty computation.
+        pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
+        pop_mean = np.mean(pop_behs, axis=0) if pop_behs else None
+
+        # f(w + c*Δ)
         for i, c in enumerate(enabled_conns):
             c.weight = float(orig_ws[i] + eps * deltas[i])
         f_plus, beh_plus = self._evaluate_genome(genome, env, n_eps, max_steps)
@@ -226,32 +239,26 @@ class GATE:
             c.weight = float(orig_ws[i] - eps * deltas[i])
         f_minus, beh_minus = self._evaluate_genome(genome, env, n_eps, max_steps)
 
-        # If dual_spsa is on and fitness is flat, use novelty as the objective.
-        use_novelty = False
-        if self.cfg.get("dual_spsa", False) and self.cfg["novelty_weight"] > 0.0:
-            # Check if fitness is flat (low variance in pop).
-            fits = [g.fitness for g in self.population]
-            fit_var = float(np.var(fits)) if fits else 0.0
-            if fit_var < self.cfg["dual_spsa_fitness_threshold"]:
-                use_novelty = True
-        if use_novelty:
-            # Use behavioral distance to population mean as novelty signal.
-            pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
-            if pop_behs:
-                pop_mean = np.mean(pop_behs, axis=0)
-                # Novelty = distance from population mean.
-                f_plus_eff = float(np.linalg.norm(np.array(beh_plus) - pop_mean))
-                f_minus_eff = float(np.linalg.norm(np.array(beh_minus) - pop_mean))
-            else:
-                f_plus_eff = f_plus
-                f_minus_eff = f_minus
+        # Compute effective fitness (fitness + novelty bonus) for both perturbations.
+        if nov_weight > 0.0 and pop_mean is not None:
+            nov_plus = float(np.linalg.norm(np.array(beh_plus) - pop_mean))
+            nov_minus = float(np.linalg.norm(np.array(beh_minus) - pop_mean))
+            # Normalize novelty by population's average novelty (for scale stability).
+            pop_novs = [float(np.linalg.norm(b - pop_mean)) for b in pop_behs]
+            avg_pop_nov = float(np.mean(pop_novs)) if pop_novs else 1.0
+            if avg_pop_nov < 1e-9:
+                avg_pop_nov = 1.0
+            nov_plus_norm = nov_plus / avg_pop_nov
+            nov_minus_norm = nov_minus / avg_pop_nov
+            f_plus_eff = f_plus + nov_weight * nov_plus_norm
+            f_minus_eff = f_minus + nov_weight * nov_minus_norm
         else:
             f_plus_eff = f_plus
             f_minus_eff = f_minus
 
         # Per-weight gradient estimate
         grad = (f_plus_eff - f_minus_eff) / (2 * eps * deltas)
-        # Update weights (gradient ascent)
+        # Update weights (gradient ascent on effective fitness)
         for i, c in enumerate(enabled_conns):
             c.weight = float(orig_ws[i] + lr * grad[i])
             # Update EMA saliency
@@ -383,7 +390,17 @@ class GATE:
                     other_sp = self.rng.choice(self.speciator.species)
                     parent_b = self.rng.choice(other_sp.members)
                 child = crossover(parent_a, parent_b, self.rng)
-                mutate(child, self.tracker, self.rng, self.cfg)
+                # Determine if we're in exploration mode (fitness contributes little to effective fitness).
+                # This is true when novelty_weight > 0 and fitness variance is small relative to novelty scale.
+                fits = [g.fitness for g in self.population]
+                fit_var = float(np.var(fits)) if fits else 0.0
+                in_explore_mode = (self.cfg["novelty_weight"] > 0.0
+                                   and fit_var < self.cfg["novelty_weight"] * 0.5)
+                # Disable saliency-weighted mutation in explore mode (saliency is novelty-based, not fitness-based).
+                mut_cfg = dict(self.cfg)
+                if in_explore_mode:
+                    mut_cfg["saliency_weighted_mutation"] = False
+                mutate(child, self.tracker, self.rng, mut_cfg)
                 if is_stagnated and self.rng.random() < self.cfg["stagnation_explore_rate"]:
                     if self.rng.random() < 0.5:
                         mutate_add_node(child, self.tracker, self.rng)
