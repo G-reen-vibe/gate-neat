@@ -105,6 +105,10 @@ GATE_CFG = {
     "use_archive": True,                  # enable behavioral archive
     "archive_size": 30,                   # max archive size (small = focused on truly novel)
     "archive_add_threshold": 0.8,         # add to archive if novelty > this * max_nov (high = selective)
+    # Saliency-aware crossover: inherit matching genes from parent with higher EMA saliency
+    "saliency_aware_crossover": True,
+    # Topology compression: periodically remove disabled connections and isolated hidden nodes
+    "compress_every": 10,              # run compression every N generations
 }
 
 
@@ -433,7 +437,8 @@ class GATE:
                         and len(self.speciator.species) > 1):
                     other_sp = self.rng.choice(self.speciator.species)
                     parent_b = self.rng.choice(other_sp.members)
-                child = crossover(parent_a, parent_b, self.rng)
+                child = crossover(parent_a, parent_b, self.rng,
+                                  saliency_aware=self.cfg.get("saliency_aware_crossover", True))
                 # Determine if we're in exploration mode (fitness contributes little to effective fitness).
                 # This is true when novelty_weight > 0 and fitness variance is small relative to novelty scale.
                 fits = [g.fitness for g in self.population]
@@ -512,6 +517,52 @@ class GATE:
         # Update the config value so SPSA uses the new weight.
         self.cfg["novelty_weight"] = self._cur_novelty_weight
 
+    def compress_genome(self, genome: Genome):
+        """Remove disabled connections and isolated hidden nodes from a genome.
+        This prevents bloat from accumulated pruning decisions. Only removes connections
+        that have been disabled for a while (age > 5) to avoid removing recently-disabled
+        connections that might be re-enabled."""
+        # Remove old disabled connections.
+        to_remove = []
+        for inv, conn in genome.connections.items():
+            if not conn.enabled and conn.age > 5:
+                to_remove.append(inv)
+        for inv in to_remove:
+            del genome.connections[inv]
+        # Remove isolated hidden nodes (no enabled incoming or outgoing connections).
+        connected_nodes = set()
+        for c in genome.connections.values():
+            if c.enabled:
+                connected_nodes.add(c.in_node)
+                connected_nodes.add(c.out_node)
+        to_remove_nodes = []
+        for nid, node in genome.nodes.items():
+            if node.type == NodeType.HIDDEN and nid not in connected_nodes:
+                to_remove_nodes.append(nid)
+        for nid in to_remove_nodes:
+            del genome.nodes[nid]
+        # Remove any connections referencing removed nodes.
+        to_remove_conns = []
+        for inv, c in genome.connections.items():
+            if c.in_node not in genome.nodes or c.out_node not in genome.nodes:
+                to_remove_conns.append(inv)
+        for inv in to_remove_conns:
+            del genome.connections[inv]
+
+    def _maybe_compress(self):
+        """Run compression on all genomes periodically."""
+        if self.cfg.get("compress_every", 0) <= 0:
+            return
+        if self.generation > 0 and self.generation % self.cfg["compress_every"] == 0:
+            for g in self.population:
+                self.compress_genome(g)
+        # Increment ages of all connections and nodes.
+        for g in self.population:
+            for c in g.connections.values():
+                c.age += 1
+            for n in g.nodes.values():
+                n.age += 1
+
     def step(self, env_factory: Callable) -> dict:
         t0 = time.time()
         if self.generation == 0:
@@ -535,6 +586,8 @@ class GATE:
                 self.best_genome = g.copy()
         # Update adaptive novelty weight based on improvement.
         self._update_adaptive_novelty(best)
+        # Run topology compression periodically.
+        self._maybe_compress()
         stats = {
             "generation": self.generation,
             "best": best,
