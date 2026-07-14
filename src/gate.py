@@ -49,6 +49,7 @@ GATE_CFG = {
     "spsa_eps": 0.3,                # perturbation magnitude
     "spsa_lr": 0.15,                # weight step size
     "spsa_episodes": 2,             # episodes per SPSA evaluation (f+ and f-)
+    "spsa_n_probes": 1,             # number of SPSA probes to average (more = less noise)
     "saliency_ema_decay": 0.5,      # EMA decay for |g_i| (smaller = faster adaptation)
     # Topology growth (driven by saliency)
     "saliency_top_k": 1,            # split this many top-saliency connections per elite per gen
@@ -95,6 +96,11 @@ GATE_CFG = {
     # Saliency-weighted mutation (GATE principle applied to weight perturbation)
     "saliency_weighted_mutation": True,   # scale mutation magnitude by inverse saliency
     "saliency_mutation_scale": 2.0,       # max scale factor for low-saliency connections
+    # Adaptive novelty weight: increase when global fitness stagnates, decrease when improving
+    "adaptive_novelty": True,             # enable adaptive novelty weight
+    "adaptive_novelty_patience": 5,       # gens without improvement before increasing novelty
+    "adaptive_novelty_factor": 1.5,       # multiply novelty_weight by this when stagnating
+    "adaptive_novelty_decay": 0.7,        # multiply novelty_weight by this when improving (toward base)
 }
 
 
@@ -121,8 +127,14 @@ class GATE:
         self.generation = 0
         self.history: List[dict] = []
         self.best_genome: Optional[Genome] = None
-        self.best_fitness: float = -float("inf")
+        self.best_fitness: float = -float("inf")  # tracks RAW fitness for stopping criterion
+        self.best_effective_fitness: float = -float("inf")  # tracks effective fitness for selection
         self.total_episodes = 0
+        # Adaptive novelty state.
+        self._base_novelty_weight = self.cfg["novelty_weight"]
+        self._cur_novelty_weight = self.cfg["novelty_weight"]
+        self._best_fitness_history: List[float] = []
+        self._stagnation_count = 0
 
     def init_population(self):
         self.population = []
@@ -202,15 +214,16 @@ class GATE:
         return novelties
 
     def spsa_probe_and_step(self, genome: Genome, env) -> Tuple[float, List[Tuple[int, float]]]:
-        """Run a single SPSA probe on genome. Updates weights in-place and returns
+        """Run SPSA probe(s) on genome. Updates weights in-place and returns
         (gradient_norm, [(innovation, |g_i|), ...]) for saliency tracking.
+
+        If spsa_n_probes > 1, runs multiple probes with independent random Δ vectors
+        and averages the gradient estimates. This reduces noise at the cost of more
+        evaluations. Averaging is the standard variance-reduction technique for SPSA.
 
         The EMA saliency on each connection is updated in-place.
 
         The SPSA objective is the EFFECTIVE fitness = fitness + novelty_weight * novelty.
-        This unifies fitness and novelty into a single gradient signal: when fitness is
-        flat, the novelty term dominates and drives exploration; when fitness is informative,
-        it dominates and drives exploitation. No threshold switching needed.
         """
         eps = self.cfg["spsa_eps"]
         lr = self.cfg["spsa_lr"]
@@ -218,54 +231,53 @@ class GATE:
         max_steps = self.cfg["max_steps"]
         decay = self.cfg["saliency_ema_decay"]
         nov_weight = self.cfg["novelty_weight"]
+        n_probes = max(1, self.cfg.get("spsa_n_probes", 1))
 
         enabled_conns = [c for c in genome.connections.values() if c.enabled]
         if not enabled_conns:
             return 0.0, []
 
-        deltas = np.array([self.rng.choice([-1, 1]) for _ in enabled_conns], dtype=np.float64)
         orig_ws = np.array([c.weight for c in enabled_conns], dtype=np.float64)
-
         # Pre-compute population behaviors for novelty computation.
         pop_behs = [np.array(g.behavior) for g in self.population if g.behavior is not None]
         pop_mean = np.mean(pop_behs, axis=0) if pop_behs else None
+        pop_novs = [float(np.linalg.norm(b - pop_mean)) for b in pop_behs] if pop_behs else []
+        avg_pop_nov = float(np.mean(pop_novs)) if pop_novs else 1.0
+        if avg_pop_nov < 1e-9:
+            avg_pop_nov = 1.0
 
-        # f(w + c*Δ)
-        for i, c in enumerate(enabled_conns):
-            c.weight = float(orig_ws[i] + eps * deltas[i])
-        f_plus, beh_plus = self._evaluate_genome(genome, env, n_eps, max_steps)
-        # f(w - c*Δ)
-        for i, c in enumerate(enabled_conns):
-            c.weight = float(orig_ws[i] - eps * deltas[i])
-        f_minus, beh_minus = self._evaluate_genome(genome, env, n_eps, max_steps)
+        # Accumulate gradient over multiple probes.
+        grad_accum = np.zeros_like(orig_ws)
+        for _ in range(n_probes):
+            deltas = np.array([self.rng.choice([-1, 1]) for _ in enabled_conns], dtype=np.float64)
+            # f(w + c*Δ)
+            for i, c in enumerate(enabled_conns):
+                c.weight = float(orig_ws[i] + eps * deltas[i])
+            f_plus, beh_plus = self._evaluate_genome(genome, env, n_eps, max_steps)
+            # f(w - c*Δ)
+            for i, c in enumerate(enabled_conns):
+                c.weight = float(orig_ws[i] - eps * deltas[i])
+            f_minus, beh_minus = self._evaluate_genome(genome, env, n_eps, max_steps)
+            # Effective fitness (fitness + novelty bonus, normalized).
+            if nov_weight > 0.0 and pop_mean is not None:
+                nov_plus = float(np.linalg.norm(np.array(beh_plus) - pop_mean)) / avg_pop_nov
+                nov_minus = float(np.linalg.norm(np.array(beh_minus) - pop_mean)) / avg_pop_nov
+                f_plus_eff = f_plus + nov_weight * nov_plus
+                f_minus_eff = f_minus + nov_weight * nov_minus
+            else:
+                f_plus_eff = f_plus
+                f_minus_eff = f_minus
+            grad = (f_plus_eff - f_minus_eff) / (2 * eps * deltas)
+            grad_accum += grad
 
-        # Compute effective fitness (fitness + novelty bonus) for both perturbations.
-        if nov_weight > 0.0 and pop_mean is not None:
-            nov_plus = float(np.linalg.norm(np.array(beh_plus) - pop_mean))
-            nov_minus = float(np.linalg.norm(np.array(beh_minus) - pop_mean))
-            # Normalize novelty by population's average novelty (for scale stability).
-            pop_novs = [float(np.linalg.norm(b - pop_mean)) for b in pop_behs]
-            avg_pop_nov = float(np.mean(pop_novs)) if pop_novs else 1.0
-            if avg_pop_nov < 1e-9:
-                avg_pop_nov = 1.0
-            nov_plus_norm = nov_plus / avg_pop_nov
-            nov_minus_norm = nov_minus / avg_pop_nov
-            f_plus_eff = f_plus + nov_weight * nov_plus_norm
-            f_minus_eff = f_minus + nov_weight * nov_minus_norm
-        else:
-            f_plus_eff = f_plus
-            f_minus_eff = f_minus
-
-        # Per-weight gradient estimate
-        grad = (f_plus_eff - f_minus_eff) / (2 * eps * deltas)
+        grad_avg = grad_accum / n_probes
         # Update weights (gradient ascent on effective fitness)
         for i, c in enumerate(enabled_conns):
-            c.weight = float(orig_ws[i] + lr * grad[i])
-            # Update EMA saliency
-            c.saliency = decay * c.saliency + (1 - decay) * abs(float(grad[i]))
+            c.weight = float(orig_ws[i] + lr * grad_avg[i])
+            c.saliency = decay * c.saliency + (1 - decay) * abs(float(grad_avg[i]))
 
         saliencies = [(c.innovation, c.saliency) for c in enabled_conns]
-        return float(np.linalg.norm(grad)), saliencies
+        return float(np.linalg.norm(grad_avg)), saliencies
 
     def saliency_directed_grow(self, genome: Genome, saliencies: List[Tuple[int, float]]):
         """Split the top-K connections by EMA saliency."""
@@ -425,8 +437,10 @@ class GATE:
             env.close()
         for g in self.population:
             eff = getattr(g, 'effective_fitness', g.fitness)
-            if eff > self.best_fitness:
-                self.best_fitness = eff
+            if eff > self.best_effective_fitness:
+                self.best_effective_fitness = eff
+            if g.fitness > self.best_fitness:
+                self.best_fitness = g.fitness
                 self.best_genome = g.copy()
         self._last_debug = {
             "total_spsa": total_spsa,
@@ -440,6 +454,31 @@ class GATE:
         if not hasattr(self, "_env_factory_fn"):
             raise RuntimeError("Call run() with env_factory")
         return self._env_factory_fn()
+
+    def _update_adaptive_novelty(self, best_fitness: float):
+        """Adjust novelty_weight based on whether best fitness is improving."""
+        if not self.cfg.get("adaptive_novelty", False):
+            return
+        if self._best_fitness_history:
+            prev_best = max(self._best_fitness_history)
+            if best_fitness > prev_best + 1e-6:
+                # Improvement: decay novelty weight toward base.
+                self._cur_novelty_weight = max(
+                    self._base_novelty_weight,
+                    self._cur_novelty_weight * self.cfg["adaptive_novelty_decay"],
+                )
+                self._stagnation_count = 0
+            else:
+                self._stagnation_count += 1
+                if self._stagnation_count >= self.cfg["adaptive_novelty_patience"]:
+                    self._cur_novelty_weight *= self.cfg["adaptive_novelty_factor"]
+                    self._stagnation_count = 0
+        self._best_fitness_history.append(best_fitness)
+        # Keep last 20 generations.
+        if len(self._best_fitness_history) > 20:
+            self._best_fitness_history = self._best_fitness_history[-20:]
+        # Update the config value so SPSA uses the new weight.
+        self.cfg["novelty_weight"] = self._cur_novelty_weight
 
     def step(self, env_factory: Callable) -> dict:
         t0 = time.time()
@@ -457,13 +496,17 @@ class GATE:
         novs = [getattr(g, '_novelty', 0.0) for g in self.population]
         for g in self.population:
             eff = getattr(g, 'effective_fitness', g.fitness)
-            if eff > self.best_fitness:
-                self.best_fitness = eff
+            if eff > self.best_effective_fitness:
+                self.best_effective_fitness = eff
+            if g.fitness > self.best_fitness:
+                self.best_fitness = g.fitness
                 self.best_genome = g.copy()
+        # Update adaptive novelty weight based on improvement.
+        self._update_adaptive_novelty(best)
         stats = {
             "generation": self.generation,
             "best": best,
-            "best_eff": self.best_fitness,
+            "best_eff": self.best_effective_fitness,
             "mean": mean,
             "median": median,
             "std": std,
@@ -473,6 +516,7 @@ class GATE:
             "total_episodes": self.total_episodes,
             "time": time.time() - t0,
             "novelty_mean": float(np.mean(novs)) if novs else 0.0,
+            "novelty_weight": self._cur_novelty_weight,
         }
         self.history.append(stats)
         self.reproduce()
