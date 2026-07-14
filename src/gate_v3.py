@@ -93,6 +93,8 @@ GATE_V3_CFG = {
     "archive_add_threshold": 0.8,
     # Initialization
     "weight_init_std": 1.0,
+    "novelty_init": False,          # if True, generate 2x pop and keep most diverse half
+    "novelty_init_factor": 2,       # generate this many x pop_size, keep pop_size
     # Stagnation
     "max_stagnation": 15,
     "stagnation_explore_rate": 0.5,
@@ -152,6 +154,9 @@ class GATEv3:
         self._temperature = self.cfg["temp_start"]
 
     def init_population(self):
+        if self.cfg.get("novelty_init", False):
+            self._novelty_init_population()
+            return
         self.population = []
         for _ in range(self.cfg["pop_size"]):
             g = make_initial_genome(
@@ -162,6 +167,54 @@ class GATEv3:
                 rng=self.rng,
             )
             self.population.append(g)
+
+    def _novelty_init_population(self):
+        """Generate novelty_init_factor * pop_size random genomes, evaluate each for 1 episode,
+        then keep the pop_size most behaviorally diverse ones. This ensures the initial
+        population covers a wide range of behaviors, which is critical for exploration-heavy
+        tasks like MountainCar."""
+        n_candidates = self.cfg["pop_size"] * self.cfg.get("novelty_init_factor", 2)
+        candidates = []
+        for _ in range(n_candidates):
+            g = make_initial_genome(
+                self.n_inputs, self.n_outputs, self.tracker,
+                output_activation="tanh",
+                connect_input_output=True,
+                weight_init_std=self.cfg["weight_init_std"],
+                rng=self.rng,
+            )
+            candidates.append(g)
+        # Evaluate each for 1 episode.
+        env = self._env_factory_fn() if hasattr(self, "_env_factory_fn") else None
+        if env is None:
+            # Fallback: just use random selection.
+            self.population = candidates[:self.cfg["pop_size"]]
+            return
+        for g in candidates:
+            fit, beh = self._evaluate_genome(g, env, 1, self.cfg["max_steps"])
+            g.fitness = fit
+            g.behavior = beh
+        env.close()
+        # Greedy novelty-based selection: iteratively pick the most novel genome.
+        behs = [np.array(g.behavior) for g in candidates]
+        selected_indices = []
+        remaining = list(range(len(candidates)))
+        # Pick a random first genome.
+        first = self.rng.choice(remaining)
+        selected_indices.append(first)
+        remaining.remove(first)
+        while len(selected_indices) < self.cfg["pop_size"] and remaining:
+            # For each remaining, compute min distance to selected.
+            min_dists = []
+            for i in remaining:
+                dists = [float(np.linalg.norm(behs[i] - behs[j])) for j in selected_indices]
+                min_dists.append(min(dists))
+            # Pick the one with max min-distance (most novel).
+            best_idx = remaining[int(np.argmax(min_dists))]
+            selected_indices.append(best_idx)
+            remaining.remove(best_idx)
+        self.population = [candidates[i] for i in selected_indices]
+        print(f"  [novelty_init] selected {len(self.population)} from {n_candidates} candidates")
 
     def _evaluate_genome(self, genome: Genome, env, n_episodes: int, max_steps: int) -> Tuple[float, tuple]:
         net = FeedForwardNetwork(genome)
@@ -367,10 +420,14 @@ class GATEv3:
                     self._cur_novelty_weight * self.cfg["adaptive_novelty_decay"],
                 )
                 self._stagnation_count = 0
+                # Also cool temperature (exploit the improvement).
+                self._temperature = max(self.cfg["temp_end"], self._temperature * 0.8)
             else:
                 self._stagnation_count += 1
                 if self._stagnation_count >= self.cfg["adaptive_novelty_patience"]:
                     self._cur_novelty_weight *= self.cfg["adaptive_novelty_factor"]
+                    # Also heat up temperature (explore more).
+                    self._temperature = min(self.cfg["temp_start"], self._temperature * 1.5)
                     self._stagnation_count = 0
         self._best_fitness_history.append(best_fitness)
         if len(self._best_fitness_history) > 20:
